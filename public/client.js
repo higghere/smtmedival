@@ -1,138 +1,198 @@
-// client.js - Extended Visuals
-
-const socket = io();
-const canvas = document.getElementById('gameCanvas');
-const ctx = canvas.getContext('2d');
-
+// public/client.js
+const canvas = document.getElementById("gameCanvas");
+const ctx = canvas.getContext("2d");
 canvas.width = 1000;
 canvas.height = 600;
 
-let lastState = null;
-let nextState = null;
-let interpAlpha = 0;
+// --- Networking ---
+const socket = io();
+let playerId = null;
+let players = {};
+let boss = {};
+let projectiles = [];
+let particles = [];
 
-const keys = { left: false, right: false, jump: false, light: false, heavy: false, grab: false };
-const trails = [];        // weapon trails
-const sparks = [];        // hit sparks
-const grapples = [];      // chain arcs
+// --- Input ---
+const input = {
+  left: false,
+  right: false,
+  jump: false,
+  light: false,
+  heavy: false,
+  grab: false,
+  sprint: false,
+  mouseX: 0,
+  mouseY: 0,
+};
 
-window.addEventListener('keydown', e => { updateKey(e.code, true); });
-window.addEventListener('keyup', e => { updateKey(e.code, false); });
+// --- Interpolation ---
+const snapshots = [];
+const INTERP_DELAY = 100; // ms
 
-function updateKey(code, down) {
-    switch(code) {
-        case 'KeyA': keys.left = down; break;
-        case 'KeyD': keys.right = down; break;
-        case 'Space': keys.jump = down; break;
-        case 'KeyZ': keys.light = down; break;
-        case 'KeyX': keys.heavy = down; break;
-        case 'KeyE': keys.grab = down; break;
+function lerp(a, b, t) { return a + (b - a) * t; }
+
+// --- HUD ---
+function drawHUD() {
+  Object.values(players).forEach(p => {
+    // Health bar
+    ctx.fillStyle = 'black';
+    ctx.fillRect(p.x - 30, p.y - 50, 60, 8);
+    ctx.fillStyle = p.hp > 50 ? 'green' : p.hp > 25 ? 'yellow' : 'red';
+    ctx.fillRect(p.x - 30, p.y - 50, 60 * (p.hp/100), 8);
+    // Combo counter
+    if(p.combo > 1){
+      ctx.fillStyle = 'white';
+      ctx.font = '14px Arial';
+      ctx.fillText(`x${p.combo}`, p.x - 10, p.y - 60);
     }
-    socket.emit('playerInput', keys);
+  });
 }
 
-socket.on('gameState', state => {
-    lastState = nextState || state;
-    nextState = state;
-    interpAlpha = 0;
+// --- Particles ---
+function spawnParticle(x, y, color, dx, dy, life){
+  particles.push({x,y,dx,dy,life,color});
+}
+function updateParticles(dt){
+  particles = particles.filter(p => p.life>0);
+  particles.forEach(p => {
+    p.x += p.dx*dt;
+    p.y += p.dy*dt;
+    p.dy += 500*dt; // gravity
+    p.life -= dt*1000;
+  });
+}
+function drawParticles(){
+  particles.forEach(p=>{
+    ctx.fillStyle = p.color;
+    ctx.fillRect(p.x,p.y,3,3);
+  });
+}
+
+// --- Rendering ---
+function drawPlayer(p){
+  // Body
+  ctx.fillStyle = p.color;
+  ctx.fillRect(p.x-15, p.y-40, 30,40);
+  // Weapon trail
+  p.weaponTrail.forEach(trail=>{
+    ctx.fillStyle = `rgba(${trail.color.r},${trail.color.g},${trail.color.b},${trail.alpha})`;
+    ctx.fillRect(trail.x, trail.y, trail.w, trail.h);
+  });
+  // Stun effect
+  if(p.stunned){
+    ctx.fillStyle='yellow';
+    ctx.beginPath();
+    ctx.arc(p.x, p.y-50,10,0,Math.PI*2);
+    ctx.fill();
+  }
+}
+
+function drawBoss(b){
+  // Body
+  ctx.fillStyle='purple';
+  ctx.fillRect(b.x-50,b.y-150,100,150);
+  // Health bar
+  ctx.fillStyle='black';
+  ctx.fillRect(canvas.width/2-100,20,200,20);
+  ctx.fillStyle='red';
+  ctx.fillRect(canvas.width/2-100,20,200*(b.hp/b.maxHp),20);
+}
+
+// --- Grapple chains ---
+function drawGrapple(p){
+  if(p.grappling){
+    ctx.strokeStyle='grey';
+    ctx.lineWidth=3;
+    ctx.beginPath();
+    ctx.moveTo(p.x,p.y-20);
+    ctx.lineTo(p.grappleX,p.grappleY);
+    ctx.stroke();
+  }
+}
+
+// --- Projectiles ---
+function drawProjectile(prj){
+  ctx.fillStyle=prj.color;
+  ctx.beginPath();
+  ctx.arc(prj.x,prj.y,prj.radius,0,Math.PI*2);
+  ctx.fill();
+}
+
+// --- Game Loop ---
+let lastTime = performance.now();
+function gameLoop(now){
+  const dt = (now - lastTime)/1000;
+  lastTime = now;
+  ctx.clearRect(0,0,canvas.width,canvas.height);
+
+  // Interpolate player positions
+  Object.values(players).forEach(p=>{
+    const snap = snapshots.find(s=>s.id===p.id);
+    if(snap){
+      p.x = lerp(p.x, snap.x, dt*15);
+      p.y = lerp(p.y, snap.y, dt*15);
+      p.hp = snap.hp;
+      p.combo = snap.combo;
+      p.stunned = snap.stunned;
+      p.grappling = snap.grappling;
+      p.grappleX = snap.grappleX;
+      p.grappleY = snap.grappleY;
+      p.weaponTrail = snap.weaponTrail || [];
+    }
+  });
+
+  // Draw everything
+  drawBoss(boss);
+  Object.values(players).forEach(drawPlayer);
+  Object.values(players).forEach(drawGrapple);
+  projectiles.forEach(drawProjectile);
+  drawParticles();
+  drawHUD();
+
+  requestAnimationFrame(gameLoop);
+}
+requestAnimationFrame(gameLoop);
+
+// --- Input Events ---
+document.addEventListener('keydown', e=>{
+  switch(e.code){
+    case 'KeyA': input.left=true; break;
+    case 'KeyD': input.right=true; break;
+    case 'Space': input.jump=true; break;
+    case 'KeyZ': input.light=true; break;
+    case 'KeyX': input.heavy=true; break;
+    case 'KeyE': input.grab=true; break;
+    case 'ShiftLeft': input.sprint=true; break;
+  }
+});
+document.addEventListener('keyup', e=>{
+  switch(e.code){
+    case 'KeyA': input.left=false; break;
+    case 'KeyD': input.right=false; break;
+    case 'Space': input.jump=false; break;
+    case 'KeyZ': input.light=false; break;
+    case 'KeyX': input.heavy=false; break;
+    case 'KeyE': input.grab=false; break;
+    case 'ShiftLeft': input.sprint=false; break;
+  }
+});
+canvas.addEventListener('mousemove', e=>{
+  const rect = canvas.getBoundingClientRect();
+  input.mouseX = e.clientX - rect.left;
+  input.mouseY = e.clientY - rect.top;
 });
 
-// LERP helper
-function lerp(a,b,t){ return a+(b-a)*t; }
-
-// interpolate entity
-function interpolateEntity(e){
-    if(!lastState || !nextState) return e;
-    const l = lastState.players[e.id] || e;
-    const n = nextState.players[e.id] || e;
-    return { x:lerp(l.x,n.x,interpAlpha), y:lerp(l.y,n.y,interpAlpha), hp:n.hp, weapon:n.weapon, state:n.state, combo:n.combo||0 };
-}
-
-// add weapon trail
-function addTrail(x,y,color){
-    trails.push({x,y,color,life:8});
-}
-
-// add hit spark
-function addSpark(x,y){
-    sparks.push({x,y,r:Math.random()*3+2,life:6});
-}
-
-// add grapple arc
-function addGrapple(x1,y1,x2,y2){
-    grapples.push({x1,y1,x2,y2,life:10});
-}
-
-// render loop
-function render(){
-    ctx.clearRect(0,0,canvas.width,canvas.height);
-    if(!nextState) return;
-    interpAlpha+=0.05; if(interpAlpha>1) interpAlpha=1;
-
-    // --- players ---
-    Object.values(nextState.players).forEach(p=>{
-        const pl = interpolateEntity(p);
-        // body
-        ctx.fillStyle = p.id===socket.id?'blue':'red';
-        ctx.fillRect(pl.x-20,pl.y-50,40,50);
-
-        // HP bar
-        ctx.fillStyle='black'; ctx.fillRect(pl.x-25,pl.y-60,50,5);
-        ctx.fillStyle='green'; ctx.fillRect(pl.x-25,pl.y-60,50*(pl.hp/100),5);
-
-        // weapon indicator
-        ctx.fillStyle='yellow'; ctx.font='14px Arial'; ctx.fillText(pl.weapon,pl.x-20,pl.y-70);
-
-        // combo
-        if(pl.combo>1){ ctx.fillStyle='orange'; ctx.font='16px Arial'; ctx.fillText('x'+pl.combo,pl.x-10,pl.y-80); }
-
-        // weapon trail
-        if(p.state.includes('slash')) addTrail(pl.x,pl.y,'white');
-        if(p.state.includes('uppercut')) addTrail(pl.x,pl.y,'cyan');
-        if(p.state.includes('heavy')) addTrail(pl.x,pl.y,'red');
-
-        // grapple
-        if(p.state==='grappling') addGrapple(pl.x,pl.y,pl.grappleX||pl.x,pl.grappleY||pl.y);
-    });
-
-    // --- boss ---
-    if(nextState.boss){
-        const b = nextState.boss;
-        const bx = lerp(lastState?.boss?.x||b.x,b.x,interpAlpha);
-        const by = lerp(lastState?.boss?.y||b.y,b.y,interpAlpha);
-
-        ctx.fillStyle='purple'; ctx.fillRect(bx-50,by-150,100,150);
-        // boss HP
-        ctx.fillStyle='black'; ctx.fillRect(canvas.width/2-200,20,400,20);
-        ctx.fillStyle='red'; ctx.fillRect(canvas.width/2-200,20,400*(b.hp/b.maxHp),20);
-    }
-
-    // --- trails ---
-    trails.forEach((t,i)=>{
-        ctx.fillStyle=t.color;
-        ctx.fillRect(t.x-3,t.y-3,6,6);
-        t.life--; if(t.life<=0) trails.splice(i,1);
-    });
-
-    // --- sparks ---
-    sparks.forEach((s,i)=>{
-        ctx.fillStyle='yellow';
-        ctx.beginPath();
-        ctx.arc(s.x,s.y,s.r,0,Math.PI*2);
-        ctx.fill();
-        s.life--; if(s.life<=0) sparks.splice(i,1);
-    });
-
-    // --- grapples ---
-    grapples.forEach((g,i)=>{
-        ctx.strokeStyle='orange';
-        ctx.lineWidth=2;
-        ctx.beginPath();
-        ctx.moveTo(g.x1,g.y1); ctx.lineTo(g.x2,g.y2); ctx.stroke();
-        g.life--; if(g.life<=0) grapples.splice(i,1);
-    });
-
-    requestAnimationFrame(render);
-}
-
-render();
+// --- Networking ---
+socket.on('connect', ()=>{ playerId = socket.id; });
+socket.on('state', data=>{
+  // Update snapshots for interpolation
+  data.players.forEach(s=>{
+    const p = players[s.id] || {id:s.id, x:s.x, y:s.y, hp:s.hp, combo:0, stunned:false, grappling:false, weaponTrail:[]};
+    players[s.id] = {...p, ...s};
+  });
+  boss = data.boss;
+  projectiles = data.projectiles || [];
+});
+setInterval(()=>{
+  if(playerId) socket.emit('input', input);
+}, 1000/60);
