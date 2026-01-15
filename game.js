@@ -387,7 +387,8 @@ setInterval(() => {
 
   io.emit("state", { players, boss });
 }, DT);
-const TICK_RATE = 60;
+const SERVER_TICK_RATE = 60; 
+
 const FIXED_DT = 1000 / TICK_RATE;
 let serverTick = 0;
 
