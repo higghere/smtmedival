@@ -387,3 +387,206 @@ setInterval(() => {
 
   io.emit("state", { players, boss });
 }, DT);
+const TICK_RATE = 60;
+const FIXED_DT = 1000 / TICK_RATE;
+let serverTick = 0;
+
+function fixedUpdate() {
+  serverTick++;
+
+  for (let id in players) {
+    stepPlayer(players[id]);
+  }
+
+  stepBoss(boss);
+  resolveCollisions();
+  processHitboxes();
+
+  saveSnapshot();
+  io.emit("state", { players, boss, tick: serverTick });
+}
+
+setInterval(fixedUpdate, FIXED_DT);
+const SNAPSHOT_BUFFER = 120;
+let snapshots = [];
+
+function saveSnapshot() {
+  snapshots.push({
+    tick: serverTick,
+    players: JSON.parse(JSON.stringify(players)),
+    boss: JSON.parse(JSON.stringify(boss))
+  });
+
+  if (snapshots.length > SNAPSHOT_BUFFER) {
+    snapshots.shift();
+  }
+}
+function rollbackTo(tick) {
+  const snap = snapshots.find(s => s.tick === tick);
+  if (!snap) return;
+
+  players = JSON.parse(JSON.stringify(snap.players));
+  boss = JSON.parse(JSON.stringify(snap.boss));
+  serverTick = tick;
+}
+io.on("connection", socket => {
+  socket.on("input", data => {
+    const p = players[socket.id];
+    if (!p) return;
+
+    if (data.tick < serverTick) {
+      rollbackTo(data.tick);
+      p.inputBuffer.push(data.input);
+      for (let t = data.tick; t < serverTick; t++) fixedUpdate();
+    } else {
+      p.inputBuffer.push(data.input);
+    }
+  });
+});
+const WeaponFSM = {
+  katana: {
+    idle: {
+      light: "slash1",
+      heavy: "uppercut"
+    },
+    slash1: {
+      frames: 18,
+      next: "slash2",
+      dmg: 18
+    },
+    slash2: {
+      frames: 20,
+      next: "slash3",
+      dmg: 18
+    },
+    slash3: {
+      frames: 22,
+      launch: true,
+      dmg: 22
+    },
+    uppercut: {
+      frames: 26,
+      launcher: true,
+      dmg: 24
+    }
+  }
+};
+function stepWeaponFSM(p) {
+  const fsm = WeaponFSM[p.weapon];
+  const state = fsm[p.attackState];
+  if (!state) return;
+
+  p.attackFrame++;
+
+  if (p.attackFrame === 5) {
+    spawnHitbox(p, state);
+  }
+
+  if (p.attackFrame >= state.frames) {
+    p.attackState = state.next || "idle";
+    p.attackFrame = 0;
+  }
+}
+function routeAttack(p, input) {
+  const dir =
+    input.up ? "up" :
+    input.down ? "down" :
+    "neutral";
+
+  if (dir === "up") p.attackState = "uppercut";
+  else p.attackState = "slash1";
+
+  p.attackFrame = 0;
+}
+function applyLauncher(def) {
+  def.vy = -18;
+  def.vx *= 0.4;
+  def.airborne = true;
+  def.juggle++;
+}
+function applyAirScaling(p) {
+  if (p.juggle > 0) {
+    p.vy += 0.8 + p.juggle * 0.15;
+  } else {
+    p.vy += 0.6;
+  }
+}
+let hitstopFrames = 0;
+
+function applyHitstop(frames) {
+  hitstopFrames = Math.max(hitstopFrames, frames);
+}
+function resolveCollisions() {
+  const list = Object.values(players);
+
+  for (let i = 0; i < list.length; i++) {
+    for (let j = i + 1; j < list.length; j++) {
+      const a = list[i], b = list[j];
+      if (Math.abs(a.x - b.x) < 40) {
+        const push = (40 - Math.abs(a.x - b.x)) / 2;
+        a.x -= push;
+        b.x += push;
+      }
+    }
+  }
+}
+function checkWall(p) {
+  if (p.x < 20 || p.x > ARENA_WIDTH - 20) {
+    if (p.vx > 10) {
+      p.wallSplat = 30;
+      p.vx = 0;
+    } else {
+      p.vx *= -0.6;
+    }
+  }
+}
+function tryAirTech(p, input) {
+  if (p.canTech && input.tech) {
+    p.vx = input.left ? -6 : input.right ? 6 : 0;
+    p.vy = -8;
+    p.juggle = 0;
+    p.hitstun = 0;
+  }
+}
+function stepBoss(b) {
+  b.cooldown--;
+
+  if (b.staggered) return;
+
+  if (b.cooldown <= 0) {
+    if (b.hp < 200) bossGrab(b);
+    else if (Math.random() < 0.5) bossDash(b);
+    else bossOrb(b);
+  }
+}
+function bossTakeDamage(b, dmg) {
+  if (!b.broken) {
+    b.breakGauge -= dmg;
+    if (b.breakGauge <= 0) {
+      b.broken = true;
+      b.staggered = true;
+      lockAllPlayers();
+    }
+  }
+  b.hp -= dmg;
+}
+function cinematicFinish() {
+  lockAllPlayers();
+  boss.hp = 0;
+  boss.dead = true;
+}
+function stepPlayer(p) {
+  resolveInputs(p);
+  stepWeaponFSM(p);
+  applyAirScaling(p);
+  checkWall(p);
+
+  p.x += p.vx;
+  p.y += p.vy;
+
+  if (p.y >= GROUND_Y) {
+    p.y = GROUND_Y;
+    p.airborne = false;
+    p.juggle = 0;
+  }
+}
