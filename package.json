@@ -1,10 +1,14 @@
 {
   "name": "silsong-pvp",
   "version": "1.0.0",
-  "type": "commonjs",
+  "description": "Online PvP Silsong-style combat game",
   "main": "server.js",
   "scripts": {
-    "start": "node server.js"
+    "start": "node server.js",
+    "build": "npm install"
+  },
+  "engines": {
+    "node": ">=18"
   },
   "dependencies": {
     "express": "^4.19.2",
