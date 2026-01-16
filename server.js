@@ -16,6 +16,7 @@ const CANVAS_HEIGHT = 600;
 
 const players = {}; // keyed by socket.id
 let boss = null;
+app.use(express.static('public'));
 
 // ------------------ PLAYER CLASS ------------------
 class Player {
