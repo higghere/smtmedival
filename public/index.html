@@ -1,19 +1,152 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-<meta charset="UTF-8">
-<title>Silsong PvP Combat</title>
-<style>
-  canvas { background: #111; display: block; margin: 0 auto; }
-  body { margin: 0; overflow: hidden; }
-</style>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Silksong PvP Combat - Advanced Edition</title>
+  <style>
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+    
+    body {
+      margin: 0;
+      overflow: hidden;
+      background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      min-height: 100vh;
+      font-family: 'Arial', sans-serif;
+    }
+    
+    #gameContainer {
+      position: relative;
+    }
+    
+    canvas {
+      background: #0f0f1e;
+      display: block;
+      border: 3px solid #0f3460;
+      box-shadow: 0 0 30px rgba(15, 52, 96, 0.8);
+      cursor: crosshair;
+    }
+    
+    #loading {
+      position: absolute;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%);
+      color: white;
+      background: rgba(0, 0, 0, 0.8);
+      padding: 20px 40px;
+      border-radius: 10px;
+      font-size: 18px;
+      text-align: center;
+      z-index: 10;
+    }
+    
+    .spinner {
+      border: 4px solid rgba(255, 255, 255, 0.3);
+      border-top: 4px solid white;
+      border-radius: 50%;
+      width: 40px;
+      height: 40px;
+      animation: spin 1s linear infinite;
+      margin: 20px auto;
+    }
+    
+    @keyframes spin {
+      0% { transform: rotate(0deg); }
+      100% { transform: rotate(360deg); }
+    }
+    
+    #info {
+      position: absolute;
+      bottom: 10px;
+      right: 10px;
+      color: white;
+      background: rgba(0, 0, 0, 0.7);
+      padding: 15px;
+      border-radius: 8px;
+      font-size: 11px;
+      max-width: 250px;
+      border: 1px solid #0f3460;
+    }
+    
+    #info h4 {
+      margin-bottom: 8px;
+      color: #4ECDC4;
+      font-size: 14px;
+    }
+    
+    #info ul {
+      list-style: none;
+      line-height: 1.6;
+    }
+    
+    #info li::before {
+      content: "▸ ";
+      color: #4ECDC4;
+    }
+    
+    .feature-badge {
+      display: inline-block;
+      background: #0f3460;
+      color: #4ECDC4;
+      padding: 2px 6px;
+      border-radius: 3px;
+      font-size: 9px;
+      margin-left: 5px;
+    }
+  </style>
 </head>
 <body>
-  <!-- client.html -->
-<canvas id="gameCanvas" width="1000" height="600"></canvas>
-<script src="/socket.io/socket.io.js"></script>
-<script src="client.js"></script>
-
-
+  <div id="gameContainer">
+    <canvas id="gameCanvas"></canvas>
+    
+    <div id="loading">
+      <div>Connecting to Server...</div>
+      <div class="spinner"></div>
+    </div>
+    
+    <div id="info">
+      <h4>🗡️ Advanced Features</h4>
+      <ul>
+        <li>Combo System <span class="feature-badge">ACTIVE</span></li>
+        <li>Air Juggling <span class="feature-badge">ACTIVE</span></li>
+        <li>Weapon Switching <span class="feature-badge">ACTIVE</span></li>
+        <li>Parry System <span class="feature-badge">ACTIVE</span></li>
+        <li>Wall Splat <span class="feature-badge">ACTIVE</span></li>
+        <li>Grapple Hook <span class="feature-badge">ACTIVE</span></li>
+        <li>Boss Phases <span class="feature-badge">ACTIVE</span></li>
+        <li>Limb Breaking <span class="feature-badge">ACTIVE</span></li>
+      </ul>
+    </div>
+  </div>
+  
+  <script src="/socket.io/socket.io.js"></script>
+  <script src="client.js"></script>
+  
+  <script>
+    // Hide loading screen when connected
+    socket.on('connect', () => {
+      const loading = document.getElementById('loading');
+      if (loading) {
+        loading.style.display = 'none';
+      }
+    });
+    
+    // Show loading on disconnect
+    socket.on('disconnect', () => {
+      const loading = document.getElementById('loading');
+      if (loading) {
+        loading.style.display = 'block';
+        loading.innerHTML = '<div>Disconnected! Reconnecting...</div><div class="spinner"></div>';
+      }
+    });
+  </script>
 </body>
 </html>
