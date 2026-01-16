@@ -1,73 +1,123 @@
-// server.js
-const express = require('express');
-const http = require('http');
-const { Server } = require('socket.io');
-const path = require('path');
-const game = require('./game'); // Your game.js logic (FSMs, physics, boss, etc.)
+const express = require("express");
+const http = require("http");
+const { Server } = require("socket.io");
 
 const app = express();
 const server = http.createServer(app);
 const io = new Server(server);
 
-// --- Serve public folder ---
-app.use(express.static(path.join(__dirname, 'public')));
-app.get('*', (req, res) => {
-  res.sendFile(path.join(__dirname, 'public', 'index.html'));
-});
+app.use(express.static("public")); // serve client.html + client.js
 
-const PORT = process.env.PORT || 3000;
-
-// --- Game State ---
-let players = {}; // {socketId: {x,y,hp,combo,stunned,...}}
-let boss = game.createBoss(); // Your boss object from game.js
-let projectiles = [];
-
-// --- Tick loop ---
+// ------------------ GAME STATE ------------------
 const TICK_RATE = 60;
-setInterval(() => {
-  // 1. Update each player
-  for (let id in players) {
-    const p = players[id];
-    game.updatePlayer(p); // Implement movement, attacks, combos, air juggle, wall tech
+const GRAVITY = 0.6;
+const CANVAS_WIDTH = 1000;
+const CANVAS_HEIGHT = 600;
+
+const players = {}; // keyed by socket.id
+let boss = null;
+
+// ------------------ PLAYER CLASS ------------------
+class Player {
+  constructor(id, x, y) {
+    this.id = id;
+    this.x = x;
+    this.y = y;
+    this.vx = 0;
+    this.vy = 0;
+    this.hp = 100;
+    this.facing = 1;
+    this.onGround = true;
+    this.inputs = {};
+    this.weapon = "longsword";
+    this.weaponState = "idle";
+    this.comboCounter = 0;
+    this.airJuggle = 0;
+  }
+}
+
+// ------------------ PHYSICS ------------------
+function applyPhysics(p) {
+  if (!p.onGround) {
+    p.vy += GRAVITY;
   }
 
-  // 2. Update boss
-  game.updateBoss(boss, Object.values(players)); // AI, attacks, phases, break gauge
+  p.x += p.vx;
+  p.y += p.vy;
 
-  // 3. Update projectiles
-  projectiles.forEach(prj => game.updateProjectile(prj));
+  // Floor
+  if (p.y >= CANVAS_HEIGHT - 64) {
+    p.y = CANVAS_HEIGHT - 64;
+    p.vy = 0;
+    p.onGround = true;
+    p.airJuggle = 0;
+  } else {
+    p.onGround = false;
+  }
 
-  // 4. Resolve collisions & hitboxes
-  game.resolveCollisions(players, boss, projectiles);
+  // Walls
+  if (p.x < 0) { p.x = 0; p.vx = 0; }
+  if (p.x > CANVAS_WIDTH - 48) { p.x = CANVAS_WIDTH - 48; p.vx = 0; }
+}
 
-  // 5. Broadcast snapshot to all clients
-  io.sockets.emit('state', {
-    players: Object.values(players),
-    boss: boss,
-    projectiles: projectiles
+// ------------------ GAME LOOP ------------------
+function gameLoop() {
+  Object.values(players).forEach(p => {
+    // apply inputs
+    const speed = 5;
+    if (p.inputs.left) p.vx = -speed;
+    else if (p.inputs.right) p.vx = speed;
+    else p.vx = 0;
+
+    if (p.inputs.jump && p.onGround) { p.vy = -12; p.onGround = false; }
+
+    applyPhysics(p);
   });
-}, 1000 / TICK_RATE);
 
-// --- Socket.IO connections ---
-io.on('connection', socket => {
+  if (boss) updateBoss(boss);
+
+  // broadcast state
+  io.emit("stateUpdate", { players, boss });
+
+  setTimeout(gameLoop, 1000 / TICK_RATE);
+}
+
+// ------------------ BOSS (simple) ------------------
+function initBoss() {
+  boss = {
+    x: CANVAS_WIDTH / 2,
+    y: CANVAS_HEIGHT - 100,
+    hp: 500,
+    speed: 2,
+    staggered: false
+  };
+}
+
+function updateBoss(b) {
+  if (b.staggered) return;
+  // very simple AI: move toward first player
+  const pList = Object.values(players);
+  if (!pList.length) return;
+
+  const target = pList[0];
+  b.x += target.x > b.x ? b.speed : -b.speed;
+}
+
+// ------------------ SOCKET.IO ------------------
+io.on("connection", socket => {
   console.log(`Player connected: ${socket.id}`);
+  players[socket.id] = new Player(socket.id, 100, CANVAS_HEIGHT - 100);
 
-  // Create initial player state
-  players[socket.id] = game.createPlayer(socket.id);
-
-  socket.on('input', input => {
-    // Update player inputs for next tick
-    const p = players[socket.id];
-    if (p) p.input = {...input};
+  socket.on("input", data => {
+    if (players[socket.id]) players[socket.id].inputs = data;
   });
 
-  socket.on('disconnect', () => {
-    console.log(`Player disconnected: ${socket.id}`);
+  socket.on("disconnect", () => {
     delete players[socket.id];
   });
 });
 
-// --- Start server ---
-server.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
-});
+// ------------------ START ------------------
+initBoss();
+gameLoop();
+server.listen(3000, () => console.log("Server running on port 3000"));
