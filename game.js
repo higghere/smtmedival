@@ -1,1327 +1,1111 @@
-"use strict";
-
 /* =========================================================
-   GLOBAL CONSTANTS (SINGLE SOURCE OF TRUTH)
+   Full Game.js → Part 1
+   Core constants, player setup, physics, weapon states
    ========================================================= */
 
-const TICK_RATE = 60;
-const DT = 1 / TICK_RATE;
-const GRAVITY = 38;
-const FLOOR_Y = 420;
-const MAX_FALL_SPEED = 90;
+/* -----------------------------
+   GLOBAL CONSTANTS
+   ----------------------------- */
+const TICK_RATE = 60; // game ticks per second
+const GRAVITY = 0.6;
+const FLOOR_FRICTION = 0.85;
+const AIR_FRICTION = 0.98;
 
-const PLAYER_WIDTH = 32;
-const PLAYER_HEIGHT = 48;
+const CANVAS_WIDTH = 1000;
+const CANVAS_HEIGHT = 600;
 
-const AIR_TECH_WINDOW = 0.35;
-const WALL_TECH_WINDOW = 0.4;
-const COMBO_RESET_TIME = 0.9;
+const WEAPON_STATES = {
+  IDLE: "idle",
+  ATTACK: "attack",
+  HEAVY: "heavy",
+  CHARGED: "charged",
+  GRAB: "grab",
+  STAGGER: "stagger",
+  AIRBORNE: "airborne",
+  JUMP_ATTACK: "jump_attack"
+};
 
-const JUGGLE_SCALING_START = 3;
-const JUGGLE_SCALING_FACTOR = 0.85;
-const JUGGLE_MIN_KNOCKBACK = 4;
+const PLAYER_MAX_HP = 100;
 
-const BOSS_BREAK_MAX = 100;
+/* -----------------------------
+   CAMERA
+   ----------------------------- */
+let camera = {
+  x: 0,
+  y: 0,
+  zoom: 1.0,
+  target: null,
+  lock: false
+};
 
-/* =========================================================
-   BASIC UTILITIES
-   ========================================================= */
-
-function clamp(v, min, max) {
-  return Math.max(min, Math.min(max, v));
-}
-
-function sign(v) {
-  return v >= 0 ? 1 : -1;
-}
-
-function rectsOverlap(a, b) {
-  return (
-    a.x < b.x + b.w &&
-    a.x + a.w > b.x &&
-    a.y < b.y + b.h &&
-    a.y + a.h > b.y
-  );
-}
-
-/* =========================================================
-   HITBOX / HURTBOX
-   ========================================================= */
-
-class Box {
-  constructor(x, y, w, h) {
+/* -----------------------------
+   PLAYER STRUCTURE
+   ----------------------------- */
+class Player {
+  constructor(id, x, y) {
+    this.id = id;
     this.x = x;
     this.y = y;
-    this.w = w;
-    this.h = h;
-  }
-}
-
-/* =========================================================
-   GAME STATE CONTAINERS
-   ========================================================= */
-
-const players = {};
-const bosses = {};
-let frameIndex = 0;
-/* =========================================================
-   PLAYER CLASS
-   ========================================================= */
-
-class Player {
-  constructor(id) {
-    this.id = id;
-
-    // Transform
-    this.x = 120;
-    this.y = FLOOR_Y;
     this.vx = 0;
     this.vy = 0;
-    this.facing = 1;
-
-    // State
-    this.state = "idle"; // idle, run, jump, attack, hitstun, dead
-    this.onGround = true;
-    this.health = 100;
-
-    // Combo / juggle
-    this.comboCount = 0;
-    this.comboTimer = 0;
-    this.juggleCount = 0;
-
-    // Tech
-    this.airTechAvailable = true;
-    this.wallTechAvailable = true;
-    this.airTechTimer = 0;
-    this.wallTechTimer = 0;
-
-    // Wall
-    this.touchingWall = false;
-
-    // Weapon
-    this.weapon = "katana";
-    this.attackState = null;
-    this.attackTimer = 0;
-
-    // Inputs (filled by server from client)
-    this.inputs = {};
-
-    // Grapple
-    this.grapple = {
-      active: false,
-      anchorX: 0,
-      anchorY: 0,
-      length: 0,
-      angle: 0,
-      angularVelocity: 0
+    this.width = 48;
+    this.height = 64;
+    this.hp = PLAYER_MAX_HP;
+    this.facing = 1; // 1 = right, -1 = left
+    this.onGround = false;
+    this.inputs = {
+      left: false,
+      right: false,
+      jump: false,
+      light: false,
+      heavy: false,
+      grab: false,
+      disabled: false
     };
+    this.weapon = "longsword";
+    this.weaponState = WEAPON_STATES.IDLE;
+    this.weaponTimer = 0;
+    this.comboCounter = 0;
+    this.airJuggle = 0;
   }
 }
 
-/* =========================================================
-   PLAYER PHYSICS UPDATE
-   ========================================================= */
+/* -----------------------------
+   PLAYER LIST
+   ----------------------------- */
+let players = [
+  new Player(1, 100, CANVAS_HEIGHT - 100),
+  new Player(2, CANVAS_WIDTH - 150, CANVAS_HEIGHT - 100)
+];
 
-function updatePlayerPhysics(p) {
-  // Gravity
-  p.vy += GRAVITY * DT;
-  if (p.vy > MAX_FALL_SPEED) p.vy = MAX_FALL_SPEED;
+/* -----------------------------
+   BASIC PHYSICS
+   ----------------------------- */
+function applyPhysics(player) {
+  if (!player.onGround) {
+    player.vy += GRAVITY;
+    player.vy *= AIR_FRICTION;
+  } else {
+    player.vx *= FLOOR_FRICTION;
+  }
 
-  // Integrate
-  p.x += p.vx * DT;
-  p.y += p.vy * DT;
+  player.x += player.vx;
+  player.y += player.vy;
 
   // Floor collision
-  if (p.y >= FLOOR_Y) {
-    p.y = FLOOR_Y;
-    p.vy = 0;
-    p.onGround = true;
-    p.airTechAvailable = true;
-    p.juggleCount = 0;
+  if (player.y + player.height >= CANVAS_HEIGHT) {
+    player.y = CANVAS_HEIGHT - player.height;
+    player.vy = 0;
+    player.onGround = true;
+    player.airJuggle = 0;
   } else {
-    p.onGround = false;
+    player.onGround = false;
   }
 
-  // Timers
-  if (p.comboTimer > 0) {
-    p.comboTimer -= DT;
-    if (p.comboTimer <= 0) {
-      p.comboCount = 0;
-      p.juggleCount = 0;
-    }
+  // Wall collision
+  if (player.x < 0) {
+    player.x = 0;
+    player.vx = 0;
+  } else if (player.x + player.width > CANVAS_WIDTH) {
+    player.x = CANVAS_WIDTH - player.width;
+    player.vx = 0;
+  }
+}
+
+/* -----------------------------
+   PLAYER MOVEMENT INPUT
+   ----------------------------- */
+function processInputs(player) {
+  if (player.inputs.disabled) return;
+
+  const speed = 5;
+  const jumpPower = 12;
+
+  // Horizontal movement
+  if (player.inputs.left) player.vx = -speed;
+  else if (player.inputs.right) player.vx = speed;
+
+  // Jumping
+  if (player.inputs.jump && player.onGround) {
+    player.vy = -jumpPower;
+    player.onGround = false;
+  }
+}
+
+/* -----------------------------
+   WEAPON STATE MACHINE
+   ----------------------------- */
+function updateWeaponState(player, dt) {
+  switch (player.weaponState) {
+    case WEAPON_STATES.IDLE:
+      if (player.inputs.light) {
+        player.weaponState = WEAPON_STATES.ATTACK;
+        player.weaponTimer = 0.3;
+      } else if (player.inputs.heavy) {
+        player.weaponState = WEAPON_STATES.HEAVY;
+        player.weaponTimer = 0.5;
+      } else if (player.inputs.grab) {
+        player.weaponState = WEAPON_STATES.GRAB;
+        player.weaponTimer = 0.4;
+      }
+      break;
+
+    case WEAPON_STATES.ATTACK:
+      player.weaponTimer -= dt;
+      if (player.weaponTimer <= 0) {
+        player.weaponState = WEAPON_STATES.IDLE;
+      }
+      break;
+
+    case WEAPON_STATES.HEAVY:
+      player.weaponTimer -= dt;
+      if (player.weaponTimer <= 0) {
+        player.weaponState = WEAPON_STATES.IDLE;
+      }
+      break;
+
+    case WEAPON_STATES.GRAB:
+      player.weaponTimer -= dt;
+      if (player.weaponTimer <= 0) {
+        player.weaponState = WEAPON_STATES.IDLE;
+      }
+      break;
+
+    case WEAPON_STATES.STAGGER:
+      player.weaponTimer -= dt;
+      if (player.weaponTimer <= 0) {
+        player.weaponState = WEAPON_STATES.IDLE;
+      }
+      break;
+
+    default:
+      player.weaponState = WEAPON_STATES.IDLE;
+      break;
+  }
+}
+
+/* -----------------------------
+   PLAYER UPDATE HOOK
+   ----------------------------- */
+function playerUpdate(player, dt) {
+  processInputs(player);
+  applyPhysics(player);
+  updateWeaponState(player, dt);
+}
+
+/* -----------------------------
+   RENDER PLACEHOLDER
+   ----------------------------- */
+function renderGame(players, boss = null) {
+  // Placeholder for client-side rendering
+  // Replace with canvas drawing & interpolation in client.js
+  console.clear();
+  players.forEach(p =>
+    console.log(`Player ${p.id}: x=${p.x.toFixed(1)}, y=${p.y.toFixed(1)}, hp=${p.hp}`)
+  );
+  if (boss) console.log(`Boss: hp=${boss.hp}, stagger=${boss.stagger.current}`);
+}
+
+/* -----------------------------
+   GAME LOOP
+   ----------------------------- */
+let lastTime = performance.now();
+function gameLoop() {
+  const now = performance.now();
+  const dt = (now - lastTime) / 1000;
+  lastTime = now;
+
+  players.forEach(p => playerUpdate(p, dt));
+
+  if (typeof boss !== "undefined") bossUpdate(boss, dt);
+
+  renderGame(players, boss);
+
+  requestAnimationFrame(gameLoop);
+}
+
+gameLoop();
+/* =========================================================
+   Full Game.js → Part 2
+   Weapon systems, combos, directional launchers, air juggle
+   ========================================================= */
+
+/* -----------------------------
+   DAMAGE & COMBO SCALING
+   ----------------------------- */
+function applyComboScaling(defender) {
+  // Simple diminishing returns for repeated hits
+  const scale = 1 - defender.comboCounter * 0.05;
+  return Math.max(scale, 0.5);
+}
+
+/* -----------------------------
+   COMBO HIT REGISTRATION
+   ----------------------------- */
+function registerHit(attacker, defender, damage, knockbackX = 0, knockbackY = 0) {
+  const scale = applyComboScaling(defender);
+  const scaledDamage = damage * scale;
+
+  defender.hp -= scaledDamage;
+  defender.vx += knockbackX * attacker.facing;
+  defender.vy += knockbackY;
+
+  defender.comboCounter++;
+  defender.airJuggle += knockbackY !== 0 ? 1 : 0;
+
+  // Hitstun & stagger
+  defender.weaponState = WEAPON_STATES.STAGGER;
+  defender.weaponTimer = 0.3 + knockbackY * 0.02;
+}
+
+/* -----------------------------
+   LONGSWORD ATTACKS
+   ----------------------------- */
+function longswordAttack(player, target) {
+  switch (player.weaponState) {
+    case WEAPON_STATES.ATTACK:
+      registerHit(player, target, 15, 1.5, 0);
+      break;
+    case WEAPON_STATES.HEAVY:
+      registerHit(player, target, 35, 4, -2);
+      break;
+    case WEAPON_STATES.GRAB:
+      if (target.hp < 20) {
+        registerHit(player, target, 50, 5, -3);
+      }
+      break;
+    default:
+      break;
+  }
+}
+
+/* -----------------------------
+   SCYTHE ATTACKS
+   ----------------------------- */
+function scytheAttack(player, target) {
+  switch (player.weaponState) {
+    case WEAPON_STATES.ATTACK:
+      // Multi-hit combo
+      for (let i = 0; i < 3; i++) {
+        const dmg = i === 2 ? 18 : 12;
+        registerHit(player, target, dmg, 1 * (i + 1), i === 2 ? 2 : 0);
+      }
+      break;
+    case WEAPON_STATES.HEAVY:
+      registerHit(player, target, 20, 2, -1);
+      break;
+    case WEAPON_STATES.CHARGED:
+      registerHit(player, target, 30, 3, -2);
+      break;
+    default:
+      break;
+  }
+}
+
+/* -----------------------------
+   KATANA ATTACKS
+   ----------------------------- */
+function katanaAttack(player, target) {
+  switch (player.weaponState) {
+    case WEAPON_STATES.ATTACK:
+      registerHit(player, target, 18, 1.5, 0);
+      break;
+    case WEAPON_STATES.HEAVY:
+      registerHit(player, target, 22, 2.5, -1);
+      break;
+    case WEAPON_STATES.CHARGED:
+      registerHit(player, target, 28, 3, -1.5);
+      break;
+    default:
+      break;
+  }
+}
+
+/* -----------------------------
+   FIST & TANTO ATTACKS
+   ----------------------------- */
+function fistTantoAttack(player, target) {
+  switch (player.weaponState) {
+    case WEAPON_STATES.ATTACK:
+      registerHit(player, target, 14, 1, 0);
+      registerHit(player, target, 16, 1, 0.5);
+      break;
+    case WEAPON_STATES.HEAVY:
+      registerHit(player, target, 20, 2, -1);
+      break;
+    case WEAPON_STATES.CHARGED:
+      registerHit(player, target, 35, 3, -2);
+      break;
+    default:
+      break;
+  }
+}
+
+/* -----------------------------
+   AIR JUGGLE / LAUNCHERS
+   ----------------------------- */
+function applyAirJuggle(player, target) {
+  if (target.airJuggle > 0) {
+    const launchMultiplier = 0.5 + 0.1 * target.airJuggle;
+    target.vy -= 2 * launchMultiplier;
+    target.vx += 1.5 * launchMultiplier * player.facing;
+  }
+}
+
+/* -----------------------------
+   DIRECTIONAL LAUNCH HANDLER
+   ----------------------------- */
+function directionalLaunch(player, target, direction) {
+  const knockback = 4;
+  const vertical = 3;
+  switch (direction) {
+    case "up":
+      target.vy -= vertical;
+      target.vx += knockback * player.facing * 0.5;
+      break;
+    case "forward":
+      target.vx += knockback * player.facing;
+      target.vy -= vertical * 0.5;
+      break;
+    case "diagonal":
+      target.vx += knockback * player.facing;
+      target.vy -= vertical;
+      break;
+    default:
+      break;
+  }
+  target.airJuggle++;
+}
+
+/* -----------------------------
+   PLAYER ATTACK UPDATE
+   ----------------------------- */
+function playerAttackUpdate(attacker, defender) {
+  switch (attacker.weapon) {
+    case "longsword":
+      longswordAttack(attacker, defender);
+      break;
+    case "scythe":
+      scytheAttack(attacker, defender);
+      break;
+    case "katana":
+      katanaAttack(attacker, defender);
+      break;
+    case "fist_tanto":
+      fistTantoAttack(attacker, defender);
+      break;
+    default:
+      break;
   }
 
-  if (!p.airTechAvailable) {
-    p.airTechTimer -= DT;
-    if (p.airTechTimer <= 0) {
-      p.airTechAvailable = true;
-    }
+  // Apply air juggle if in air
+  if (!defender.onGround) {
+    applyAirJuggle(attacker, defender);
   }
 }
 /* =========================================================
-   COMBO & JUGGLE SCALING
+   Full Game.js → Part 3
+   Grappling physics, jump attacks, wall tech/splat, combo resets
    ========================================================= */
 
-function applyComboScaling(attacker, baseKnockback) {
-  if (attacker.juggleCount < JUGGLE_SCALING_START) {
-    return baseKnockback;
+/* -----------------------------
+   CHAIN GRAPPLING / SWING
+   ----------------------------- */
+function attemptGrapple(player, grapplePoint) {
+  if (!grapplePoint) return;
+
+  player.grappling = true;
+  player.grappleTarget = grapplePoint;
+
+  // Calculate swing vector
+  const dx = grapplePoint.x - player.x;
+  const dy = grapplePoint.y - player.y;
+  player.vx = dx * 0.1;
+  player.vy = dy * 0.1;
+}
+
+function releaseGrapple(player) {
+  player.grappling = false;
+  player.grappleTarget = null;
+  // Launch off in current direction
+  player.vx *= 1.2;
+  player.vy *= 0.9;
+}
+
+/* -----------------------------
+   JUMP ATTACKS
+   ----------------------------- */
+function jumpAttack(player, defender) {
+  if (player.onGround) return;
+
+  switch (player.weapon) {
+    case "longsword":
+      registerHit(player, defender, 25, 2.5, -2);
+      break;
+    case "scythe":
+      registerHit(player, defender, 20, 1.5, -3);
+      break;
+    case "katana":
+      registerHit(player, defender, 25, 2, -2.5);
+      break;
+    case "fist_tanto":
+      registerHit(player, defender, 20, 1.5, -2);
+      break;
+    default:
+      break;
   }
-
-  let scale =
-    Math.pow(
-      JUGGLE_SCALING_FACTOR,
-      attacker.juggleCount - JUGGLE_SCALING_START + 1
-    );
-
-  let kb = baseKnockback * scale;
-  return Math.max(kb, JUGGLE_MIN_KNOCKBACK);
+  // Apply directional launcher
+  directionalLaunch(player, defender, "diagonal");
 }
 
-/* =========================================================
-   APPLY HIT
-   ========================================================= */
+/* -----------------------------
+   MID-AIR GRAB
+   ----------------------------- */
+function midAirGrab(player, defender) {
+  if (defender.onGround || player.grabbing) return;
 
-function applyHit(attacker, defender, data) {
-  if (defender.state === "dead") return;
+  player.grabbing = true;
+  defender.grabbed = true;
 
-  // Combo
-  attacker.comboCount++;
-  attacker.comboTimer = COMBO_RESET_TIME;
-  attacker.juggleCount++;
-
-  // Damage
-  defender.health -= data.damage;
-  if (defender.health <= 0) {
-    defender.health = 0;
-    defender.state = "dead";
-  }
-
-  // Knockback
-  const kb = applyComboScaling(attacker, data.knockback);
-  defender.vx = kb * sign(defender.x - attacker.x);
-  defender.vy = -data.launchY;
-
-  // Hitstun
-  defender.state = "hitstun";
-  defender.hitstunTimer = data.hitstun;
-
-  // Tech windows
-  defender.airTechAvailable = true;
-  defender.airTechTimer = AIR_TECH_WINDOW;
-}
-
-/* =========================================================
-   HITSTUN UPDATE
-   ========================================================= */
-
-function updateHitstun(p) {
-  if (p.state !== "hitstun") return;
-
-  p.hitstunTimer -= DT;
-  if (p.hitstunTimer <= 0) {
-    p.state = "idle";
-  }
-}
-/* =========================================================
-   AIR TECH
-   ========================================================= */
-
-function tryAirTech(p) {
-  if (!p.airTechAvailable) return false;
-  if (!p.inputs.tech) return false;
-  if (p.onGround) return false;
-
-  p.vx = 0;
-  p.vy = -12;
-  p.state = "idle";
-  p.airTechAvailable = false;
-  p.airTechTimer = AIR_TECH_WINDOW;
-  return true;
-}
-
-/* =========================================================
-   WALL SPLAT / TECH
-   ========================================================= */
-
-function checkWallCollision(p) {
-  // Fake walls at edges
-  if (p.x < 20 || p.x > 980) {
-    p.touchingWall = true;
-    return true;
-  }
-  p.touchingWall = false;
-  return false;
-}
-
-function tryWallTech(p) {
-  if (!p.wallTechAvailable) return false;
-  if (!p.touchingWall) return false;
-  if (!p.inputs.tech) return false;
-
-  p.vx = -p.facing * 14;
-  p.vy = -10;
-  p.wallTechAvailable = false;
-  p.wallTechTimer = WALL_TECH_WINDOW;
-  p.state = "idle";
-  return true;
-}
-/* =========================================================
-   CHAIN GRAPPLE (SCYTHE)
-   ========================================================= */
-
-function startGrapple(p, anchorX, anchorY) {
-  const dx = p.x - anchorX;
-  const dy = p.y - anchorY;
-
-  p.grapple.active = true;
-  p.grapple.anchorX = anchorX;
-  p.grapple.anchorY = anchorY;
-  p.grapple.length = Math.sqrt(dx * dx + dy * dy);
-  p.grapple.angle = Math.atan2(dy, dx);
-  p.grapple.angularVelocity = 0;
-}
-
-function releaseGrapple(p) {
-  if (!p.grapple.active) return;
-
-  p.vx = Math.cos(p.grapple.angle) * 18;
-  p.vy = Math.sin(p.grapple.angle) * 18;
-  p.grapple.active = false;
-}
-
-function updateGrapple(p) {
-  if (!p.grapple.active) return;
-
-  const g = p.grapple;
-
-  g.angularVelocity += (-GRAVITY / g.length) * Math.sin(g.angle) * DT;
-  g.angle += g.angularVelocity * DT;
-
-  p.x = g.anchorX + Math.cos(g.angle) * g.length;
-  p.y = g.anchorY + Math.sin(g.angle) * g.length;
-}
-/* =========================================================
-   BOSS CLASS
-   ========================================================= */
-
-class Boss {
-  constructor() {
-    this.x = 500;
-    this.y = FLOOR_Y;
-    this.health = 750;
-    this.breakGauge = 0;
-    this.phase = 1;
-    this.state = "idle";
-    this.untouchable = false;
-    this.limbs = {
-      leftArm: true,
-      rightArm: true
-    };
-  }
-}
-
-/* =========================================================
-   BOSS DAMAGE & BREAK
-   ========================================================= */
-
-function damageBoss(boss, dmg, breakDmg) {
-  if (boss.untouchable) return;
-
-  boss.health -= dmg;
-  boss.breakGauge += breakDmg;
-
-  if (boss.breakGauge >= BOSS_BREAK_MAX) {
-    boss.breakGauge = 0;
-    boss.state = "stagger";
-    boss.staggerTimer = 3;
-  }
-
-  if (boss.health <= 0) {
-    boss.state = "dead";
-  }
-}
-
-function updateBoss(boss) {
-  if (boss.state === "stagger") {
-    boss.staggerTimer -= DT;
-    if (boss.staggerTimer <= 0) {
-      boss.state = "idle";
-    }
-  }
-}
-/* =========================================================
-   CINEMATIC FINISHER
-   ========================================================= */
-
-function tryCinematicFinish(player, boss) {
-  if (boss.state !== "stagger") return false;
-  if (boss.health > 50) return false;
-
-  boss.state = "cinematic";
-  boss.untouchable = true;
-
-  player.state = "cinematic";
+  // Lock both in place
+  defender.vx = 0;
+  defender.vy = 0;
   player.vx = 0;
   player.vy = 0;
 
-  boss.cinematicTimer = 4;
-  return true;
+  // Slam after 0.25s
+  setTimeout(() => {
+    defender.grabbed = false;
+    player.grabbing = false;
+    registerHit(player, defender, 40, 3, -4);
+  }, 250);
 }
 
-function updateCinematic(boss, player) {
-  if (boss.state !== "cinematic") return;
-
-  boss.cinematicTimer -= DT;
-  if (boss.cinematicTimer <= 0) {
-    boss.health = 0;
-    boss.state = "dead";
-    player.state = "idle";
-  }
-}
-/* =========================================================
-   MAIN GAME LOOP
-   ========================================================= */
-
-function updateGame() {
-  frameIndex++;
-
-  for (const id in players) {
-    const p = players[id];
-
-    updatePlayerPhysics(p);
-    updateHitstun(p);
-    tryAirTech(p);
-    checkWallCollision(p);
-    tryWallTech(p);
-    updateGrapple(p);
-  }
-
-  for (const id in bosses) {
-    updateBoss(bosses[id]);
+/* -----------------------------
+   WALL SPLAT
+   ----------------------------- */
+function wallSplat(player, wallX) {
+  // Determine if player hits wall
+  if ((player.x < wallX && player.vx < 0) || (player.x > wallX && player.vx > 0)) {
+    player.vx = 0;
+    player.vy = 0;
+    player.onWall = true;
+    player.wallTimer = 0.5; // seconds stuck
+    player.hp -= 10; // minor impact damage
   }
 }
 
-setInterval(updateGame, 1000 / TICK_RATE);
-
-/* =========================================================
-   EXPORTS
-   ========================================================= */
-
-module.exports = {
-  players,
-  bosses,
-  Player,
-  Boss,
-  updateGame
-};
-/* =========================================================
-   INPUT BUFFER & DIRECTIONAL PARSER
-   ========================================================= */
-
-const INPUT_BUFFER_TIME = 0.25;
-
-class InputBuffer {
-  constructor() {
-    this.buffer = [];
-  }
-
-  push(input) {
-    this.buffer.push({
-      input,
-      time: INPUT_BUFFER_TIME
-    });
-  }
-
-  update() {
-    for (let i = this.buffer.length - 1; i >= 0; i--) {
-      this.buffer[i].time -= DT;
-      if (this.buffer[i].time <= 0) {
-        this.buffer.splice(i, 1);
-      }
-    }
-  }
-
-  consume(pattern) {
-    let idx = 0;
-    for (let i = 0; i < this.buffer.length; i++) {
-      if (this.buffer[i].input === pattern[idx]) {
-        idx++;
-        if (idx === pattern.length) {
-          this.buffer.splice(0, i + 1);
-          return true;
-        }
-      }
-    }
-    return false;
+/* -----------------------------
+   WALL TECH
+   ----------------------------- */
+function wallTech(player) {
+  if (player.onWall && player.wallTimer <= 0) {
+    player.vx = player.facing * 3; // push off wall
+    player.vy = -2; // small jump
+    player.onWall = false;
+    player.comboCounter = 0; // reset combo
   }
 }
 
-/* =========================================================
-   ATTACH INPUT BUFFER TO PLAYER
-   ========================================================= */
-
-for (const id in players) {
-  players[id].inputBuffer = new InputBuffer();
-}
-
-/* =========================================================
-   UPDATE INPUT BUFFER PER PLAYER
-   ========================================================= */
-
-function updateInputBuffer(p) {
-  if (p.inputs.left) p.inputBuffer.push("LEFT");
-  if (p.inputs.right) p.inputBuffer.push("RIGHT");
-  if (p.inputs.up) p.inputBuffer.push("UP");
-  if (p.inputs.down) p.inputBuffer.push("DOWN");
-  if (p.inputs.attack) p.inputBuffer.push("ATTACK");
-  if (p.inputs.heavy) p.inputBuffer.push("HEAVY");
-
-  p.inputBuffer.update();
-}
-
-/* =========================================================
-   DIRECTIONAL MOVE DETECTION
-   ========================================================= */
-
-function detectDirectionalMove(p) {
-  // ↓ + ATTACK = launcher
-  if (p.inputBuffer.consume(["DOWN", "ATTACK"])) {
-    return "DOWN_ATTACK";
-  }
-
-  // → + HEAVY = forward smash
-  if (p.inputBuffer.consume(["RIGHT", "HEAVY"])) {
-    return "FORWARD_HEAVY";
-  }
-
-  // ↓ ↘ → + ATTACK (quarter circle)
-  if (
-    p.inputBuffer.consume(["DOWN", "RIGHT", "ATTACK"]) ||
-    p.inputBuffer.consume(["DOWN", "RIGHT", "HEAVY"])
-  ) {
-    return "QC_ATTACK";
-  }
-
-  return null;
-}
-/* =========================================================
-   WEAPON STATE MACHINES
-   ========================================================= */
-
-const WEAPON_STATES = {
-  IDLE: "IDLE",
-  STARTUP: "STARTUP",
-  ACTIVE: "ACTIVE",
-  RECOVERY: "RECOVERY"
-};
-
-/* =========================================================
-   KATANA FSM
-   ========================================================= */
-
-function updateKatanaFSM(p) {
-  if (!p.weaponState) {
-    p.weaponState = WEAPON_STATES.IDLE;
-    p.weaponTimer = 0;
-    p.currentMove = null;
-  }
-
-  switch (p.weaponState) {
-    case WEAPON_STATES.IDLE:
-      if (p.inputs.attack) {
-        p.weaponState = WEAPON_STATES.STARTUP;
-        p.weaponTimer = 0.12;
-        p.currentMove = "KATANA_SLASH_1";
-      }
-      break;
-
-    case WEAPON_STATES.STARTUP:
-      p.weaponTimer -= DT;
-      if (p.weaponTimer <= 0) {
-        p.weaponState = WEAPON_STATES.ACTIVE;
-        p.weaponTimer = 0.08;
-        spawnHitbox(p, {
-          x: p.x + p.facing * 40,
-          y: p.y,
-          w: 60,
-          h: 30,
-          damage: 12,
-          knockX: p.facing * 6,
-          knockY: -2
-        });
-      }
-      break;
-
-    case WEAPON_STATES.ACTIVE:
-      p.weaponTimer -= DT;
-      if (p.weaponTimer <= 0) {
-        p.weaponState = WEAPON_STATES.RECOVERY;
-        p.weaponTimer = 0.18;
-      }
-      break;
-
-    case WEAPON_STATES.RECOVERY:
-      p.weaponTimer -= DT;
-      if (p.weaponTimer <= 0) {
-        p.weaponState = WEAPON_STATES.IDLE;
-        p.currentMove = null;
-      }
-      break;
-  }
-}
-
-/* =========================================================
-   SCYTHE FSM (WIDER ARC, SLOWER)
-   ========================================================= */
-
-function updateScytheFSM(p) {
-  if (!p.weaponState) {
-    p.weaponState = WEAPON_STATES.IDLE;
-    p.weaponTimer = 0;
-    p.currentMove = null;
-  }
-
-  switch (p.weaponState) {
-    case WEAPON_STATES.IDLE:
-      if (p.inputs.attack) {
-        p.weaponState = WEAPON_STATES.STARTUP;
-        p.weaponTimer = 0.22;
-        p.currentMove = "SCYTHE_SWEEP";
-      }
-      break;
-
-    case WEAPON_STATES.STARTUP:
-      p.weaponTimer -= DT;
-      if (p.weaponTimer <= 0) {
-        p.weaponState = WEAPON_STATES.ACTIVE;
-        p.weaponTimer = 0.14;
-        spawnHitbox(p, {
-          x: p.x + p.facing * 50,
-          y: p.y - 10,
-          w: 90,
-          h: 50,
-          damage: 18,
-          knockX: p.facing * 5,
-          knockY: -4
-        });
-      }
-      break;
-
-    case WEAPON_STATES.ACTIVE:
-      p.weaponTimer -= DT;
-      if (p.weaponTimer <= 0) {
-        p.weaponState = WEAPON_STATES.RECOVERY;
-        p.weaponTimer = 0.32;
-      }
-      break;
-
-    case WEAPON_STATES.RECOVERY:
-      p.weaponTimer -= DT;
-      if (p.weaponTimer <= 0) {
-        p.weaponState = WEAPON_STATES.IDLE;
-        p.currentMove = null;
-      }
-      break;
-  }
-}
-
-/* =========================================================
-   FISTS FSM (FAST, LOW DAMAGE)
-   ========================================================= */
-
-function updateFistFSM(p) {
-  if (!p.weaponState) {
-    p.weaponState = WEAPON_STATES.IDLE;
-    p.weaponTimer = 0;
-    p.currentMove = null;
-  }
-
-  switch (p.weaponState) {
-    case WEAPON_STATES.IDLE:
-      if (p.inputs.attack) {
-        p.weaponState = WEAPON_STATES.STARTUP;
-        p.weaponTimer = 0.05;
-        p.currentMove = "JAB";
-      }
-      break;
-
-    case WEAPON_STATES.STARTUP:
-      p.weaponTimer -= DT;
-      if (p.weaponTimer <= 0) {
-        p.weaponState = WEAPON_STATES.ACTIVE;
-        p.weaponTimer = 0.04;
-        spawnHitbox(p, {
-          x: p.x + p.facing * 25,
-          y: p.y,
-          w: 30,
-          h: 25,
-          damage: 6,
-          knockX: p.facing * 3,
-          knockY: -1
-        });
-      }
-      break;
-
-    case WEAPON_STATES.ACTIVE:
-      p.weaponTimer -= DT;
-      if (p.weaponTimer <= 0) {
-        p.weaponState = WEAPON_STATES.RECOVERY;
-        p.weaponTimer = 0.08;
-      }
-      break;
-
-    case WEAPON_STATES.RECOVERY:
-      p.weaponTimer -= DT;
-      if (p.weaponTimer <= 0) {
-        p.weaponState = WEAPON_STATES.IDLE;
-        p.currentMove = null;
-      }
-      break;
-  }
-}
-
-/* =========================================================
-   WEAPON ROUTER
-   ========================================================= */
-
-function updateWeaponFSM(p) {
-  if (p.weapon === "KATANA") updateKatanaFSM(p);
-  if (p.weapon === "SCYTHE") updateScytheFSM(p);
-  if (p.weapon === "FISTS") updateFistFSM(p);
-}
-/* =========================================================
-   COMBO SYSTEM CORE
-   ========================================================= */
-
-const COMBO_WINDOW = 0.22;
-const MAX_JUGGLE = 3;
-
-function initComboData(p) {
-  if (!p.combo) {
-    p.combo = {
-      step: 0,
-      timer: 0,
-      juggle: 0,
-      lastMove: null
-    };
-  }
-}
-
-function updateComboTimer(p) {
-  if (p.combo.timer > 0) {
-    p.combo.timer -= DT;
-    if (p.combo.timer <= 0) {
-      p.combo.step = 0;
-      p.combo.lastMove = null;
+/* -----------------------------
+   COMBO RESET HANDLER
+   ----------------------------- */
+function resetCombo(player) {
+  if (player.onGround && player.comboCounter > 0) {
+    // Reset if not hitting for 1 second
+    if (!player.lastHitTime) player.lastHitTime = Date.now();
+    else if (Date.now() - player.lastHitTime > 1000) {
+      player.comboCounter = 0;
+      player.lastHitTime = null;
     }
   }
 }
 
+/* -----------------------------
+   PLAYER GRAPPLE UPDATE
+   ----------------------------- */
+function grappleUpdate(player, dt) {
+  if (!player.grappling || !player.grappleTarget) return;
+
+  const dx = player.grappleTarget.x - player.x;
+  const dy = player.grappleTarget.y - player.y;
+
+  // Simple spring physics
+  player.vx += dx * 0.05;
+  player.vy += dy * 0.05;
+  player.vx *= 0.98; // damping
+  player.vy *= 0.98;
+
+  // Allow attacking while swinging
+  if (player.attackPressed) {
+    switch (player.weapon) {
+      case "scythe":
+        registerHit(player, player.target, 18, 2, -1);
+        break;
+      default:
+        registerHit(player, player.target, 15, 1.5, -1);
+        break;
+    }
+  }
+}
+
+/* -----------------------------
+   INTEGRATED PLAYER UPDATE
+   ----------------------------- */
+function playerUpdate(player, dt) {
+  // Gravity
+  if (!player.onGround && !player.grappling) player.vy += GRAVITY * dt;
+
+  // Grapple physics
+  grappleUpdate(player, dt);
+
+  // Apply velocities
+  player.x += player.vx * dt;
+  player.y += player.vy * dt;
+
+  // Wall checks
+  if (player.onWall) {
+    player.wallTimer -= dt;
+    if (player.wallTimer <= 0) wallTech(player);
+  }
+
+  // Combo reset
+  resetCombo(player);
+
+  // Ground collision
+  if (player.y >= player.groundY) {
+    player.y = player.groundY;
+    player.onGround = true;
+    player.vy = 0;
+  } else {
+    player.onGround = false;
+  }
+}
 /* =========================================================
-   JUGGLE HANDLING
+   Full Game.js → Part 4
+   Parry, weapon clash, priority, boss stagger & limb break
    ========================================================= */
 
-function applyJuggle(defender) {
-  if (!defender.juggleCount) defender.juggleCount = 0;
-  defender.juggleCount++;
-  if (defender.juggleCount > MAX_JUGGLE) {
-    defender.vy = Math.max(defender.vy, -2);
-  }
-}
-
-function resetJuggle(defender) {
-  defender.juggleCount = 0;
-}
-
-/* =========================================================
-   KATANA COMBO TREE
-   ========================================================= */
-
-function katanaComboLogic(p) {
-  initComboData(p);
-  updateComboTimer(p);
-
-  if (p.weaponState !== WEAPON_STATES.IDLE) return;
-
-  if (!p.inputs.attack) return;
-
-  if (p.combo.step === 0) {
-    p.combo.step = 1;
-    p.combo.timer = COMBO_WINDOW;
-    p.currentMove = "KATANA_SLASH_1";
-    p.weaponState = WEAPON_STATES.STARTUP;
-    p.weaponTimer = 0.12;
-    return;
-  }
-
-  if (p.combo.step === 1 && p.combo.timer > 0) {
-    p.combo.step = 2;
-    p.combo.timer = COMBO_WINDOW;
-    p.currentMove = "KATANA_SLASH_2";
-    p.weaponState = WEAPON_STATES.STARTUP;
-    p.weaponTimer = 0.10;
-    return;
-  }
-
-  if (p.combo.step === 2 && p.combo.timer > 0) {
-    p.combo.step = 3;
-    p.combo.timer = 0;
-    p.currentMove = "KATANA_LAUNCHER";
-    p.weaponState = WEAPON_STATES.STARTUP;
-    p.weaponTimer = 0.14;
-    return;
-  }
-}
-
-/* =========================================================
-   KATANA COMBO HITBOX OVERRIDES
-   ========================================================= */
-
-function katanaComboHitbox(p) {
-  if (p.currentMove === "KATANA_SLASH_2") {
-    spawnHitbox(p, {
-      x: p.x + p.facing * 45,
-      y: p.y,
-      w: 65,
-      h: 30,
-      damage: 14,
-      knockX: p.facing * 6,
-      knockY: -2
-    });
-  }
-
-  if (p.currentMove === "KATANA_LAUNCHER") {
-    spawnHitbox(p, {
-      x: p.x + p.facing * 40,
-      y: p.y - 10,
-      w: 60,
-      h: 40,
-      damage: 10,
-      knockX: p.facing * 2,
-      knockY: -10,
-      launch: true
-    });
-  }
-}
-
-/* =========================================================
-   SCYTHE COMBO TREE (HEAVY / DELAYED)
-   ========================================================= */
-
-function scytheComboLogic(p) {
-  initComboData(p);
-  updateComboTimer(p);
-
-  if (p.weaponState !== WEAPON_STATES.IDLE) return;
-  if (!p.inputs.attack) return;
-
-  if (p.combo.step === 0) {
-    p.combo.step = 1;
-    p.combo.timer = COMBO_WINDOW + 0.1;
-    p.currentMove = "SCYTHE_HEAVY_1";
-    p.weaponState = WEAPON_STATES.STARTUP;
-    p.weaponTimer = 0.25;
-    return;
-  }
-
-  if (p.combo.step === 1 && p.combo.timer > 0) {
-    p.combo.step = 2;
-    p.combo.timer = 0;
-    p.currentMove = "SCYTHE_GROUND_SLAM";
-    p.weaponState = WEAPON_STATES.STARTUP;
-    p.weaponTimer = 0.35;
-    return;
-  }
-}
-
-/* =========================================================
-   SCYTHE COMBO HITBOXES
-   ========================================================= */
-
-function scytheComboHitbox(p) {
-  if (p.currentMove === "SCYTHE_HEAVY_1") {
-    spawnHitbox(p, {
-      x: p.x + p.facing * 55,
-      y: p.y - 10,
-      w: 100,
-      h: 45,
-      damage: 22,
-      knockX: p.facing * 7,
-      knockY: -3
-    });
-  }
-
-  if (p.currentMove === "SCYTHE_GROUND_SLAM") {
-    spawnHitbox(p, {
-      x: p.x + p.facing * 20,
-      y: p.y + 20,
-      w: 120,
-      h: 60,
-      damage: 30,
-      knockX: p.facing * 3,
-      knockY: -12,
-      launch: true,
-      screenShake: true
-    });
-  }
-}
-
-/* =========================================================
-   AIR COMBOS
-   ========================================================= */
-
-function airComboLogic(p) {
-  if (!p.airborne) return;
-  if (!p.inputs.attack) return;
-  if (p.weaponState !== WEAPON_STATES.IDLE) return;
-
-  p.currentMove = "AIR_SLASH";
-  p.weaponState = WEAPON_STATES.STARTUP;
-  p.weaponTimer = 0.08;
-}
-
-function airComboHitbox(p) {
-  if (p.currentMove === "AIR_SLASH") {
-    spawnHitbox(p, {
-      x: p.x + p.facing * 35,
-      y: p.y + 5,
-      w: 50,
-      h: 35,
-      damage: 9,
-      knockX: p.facing * 4,
-      knockY: -4
-    });
-  }
-}
-
-/* =========================================================
-   GLOBAL COMBO ROUTER
-   ========================================================= */
-
-function updateCombos(p) {
-  if (p.weapon === "KATANA") katanaComboLogic(p);
-  if (p.weapon === "SCYTHE") scytheComboLogic(p);
-  airComboLogic(p);
-}
-
-function spawnComboHitboxes(p) {
-  if (p.weapon === "KATANA") katanaComboHitbox(p);
-  if (p.weapon === "SCYTHE") scytheComboHitbox(p);
-  airComboHitbox(p);
-}
-/* =========================================================
-   HITSTOP SYSTEM (IMPACT FREEZE)
-   ========================================================= */
-
-let hitstopTimer = 0;
-let hitstopScale = 1;
-
-function triggerHitstop(duration, scale = 0.15) {
-  hitstopTimer = Math.max(hitstopTimer, duration);
-  hitstopScale = scale;
-}
-
-function applyHitstop(dt) {
-  if (hitstopTimer > 0) {
-    hitstopTimer -= dt;
-    return dt * hitstopScale;
-  }
-  return dt;
-}
-
-/* =========================================================
-   SCREEN SHAKE SYSTEM
-   ========================================================= */
-
-let screenShakeTime = 0;
-let screenShakeIntensity = 0;
-
-function triggerScreenShake(intensity, duration) {
-  screenShakeIntensity = Math.max(screenShakeIntensity, intensity);
-  screenShakeTime = Math.max(screenShakeTime, duration);
-}
-
-function getScreenShakeOffset() {
-  if (screenShakeTime <= 0) return { x: 0, y: 0 };
-
-  screenShakeTime -= DT;
-  const angle = Math.random() * Math.PI * 2;
-  const mag = screenShakeIntensity * (screenShakeTime);
-  return {
-    x: Math.cos(angle) * mag,
-    y: Math.sin(angle) * mag
-  };
-}
-
-/* =========================================================
-   SLOW MOTION SYSTEM (CINEMATIC)
-   ========================================================= */
-
-let slowMoTimer = 0;
-let slowMoFactor = 1;
-
-function triggerSlowMo(duration, factor = 0.35) {
-  slowMoTimer = Math.max(slowMoTimer, duration);
-  slowMoFactor = factor;
-}
-
-function applySlowMo(dt) {
-  if (slowMoTimer > 0) {
-    slowMoTimer -= dt;
-    return dt * slowMoFactor;
-  }
-  return dt;
-}
-
-/* =========================================================
-   GLOBAL TIME STEP MODIFIER
-   ========================================================= */
-
-function getModifiedDelta(dt) {
-  dt = applySlowMo(dt);
-  dt = applyHitstop(dt);
-  return dt;
-}
-
-/* =========================================================
-   HIT CONFIRM EFFECTS
-   ========================================================= */
-
-function onSuccessfulHit(attacker, defender, hitbox) {
-  // Basic hitstop on every confirmed hit
-  triggerHitstop(0.05);
-
-  // Heavier moves cause stronger hitstop
-  if (hitbox.damage >= 20) {
-    triggerHitstop(0.08, 0.1);
-    triggerScreenShake(6, 0.2);
-  }
-
-  // Launchers feel heavier
-  if (hitbox.launch) {
-    triggerHitstop(0.1, 0.05);
-    triggerScreenShake(10, 0.3);
-  }
-
-  // Finisher check
-  if (defender.hp <= 0) {
-    triggerSlowMo(0.6, 0.25);
-    triggerScreenShake(14, 0.5);
-  }
-}
-
-/* =========================================================
-   CAMERA INTEGRATION
-   ========================================================= */
-
-function applyCameraEffects(camera) {
-  const shake = getScreenShakeOffset();
-  camera.x += shake.x;
-  camera.y += shake.y;
-}
-
-/* =========================================================
-   DAMAGE PIPELINE HOOK
-   ========================================================= */
-
-// CALL THIS where damage is finally confirmed
-function resolveHit(attacker, defender, hitbox) {
-  defender.hp -= hitbox.damage;
-
-  defender.vx += hitbox.knockX || 0;
-  defender.vy += hitbox.knockY || 0;
-
-  if (hitbox.launch) {
-    applyJuggle(defender);
-  }
-
-  if (hitbox.screenShake) {
-    triggerScreenShake(12, 0.25);
-  }
-
-  onSuccessfulHit(attacker, defender, hitbox);
-}
-/* =========================================================
+/* -----------------------------
    PARRY SYSTEM
-   ========================================================= */
+   ----------------------------- */
+function attemptParry(attacker, defender) {
+  if (!defender.parryPressed || defender.weaponState !== WEAPON_STATES.ATTACK) return false;
 
-const PARRY_WINDOW = 0.18; // seconds
-const PARRY_STUN = 0.35;   // seconds opponent stunned on successful parry
-
-function initParry(p) {
-  if (!p.parry) {
-    p.parry = {
-      active: false,
-      timer: 0
-    };
-  }
-}
-
-function updateParry(p, dt) {
-  if (p.parry.timer > 0) {
-    p.parry.timer -= dt;
-    if (p.parry.timer <= 0) {
-      p.parry.active = false;
-    }
-  }
-}
-
-function attemptParry(p) {
-  if (p.inputs.parry && !p.parry.active) {
-    p.parry.active = true;
-    p.parry.timer = PARRY_WINDOW;
-  }
-}
-
-function checkParry(attacker, defender, hitbox) {
-  if (!defender.parry.active) return false;
-
-  // Parry successful
-  defender.parry.active = false;
-  triggerHitstop(0.08, 0.1);
-  triggerScreenShake(6, 0.15);
-
-  // Attacker stunned
-  attacker.weaponState = WEAPON_STATES.STUNNED;
-  attacker.weaponTimer = PARRY_STUN;
-
-  // Minor recoil for defender
-  defender.vx -= defender.facing * 2;
-
-  return true;
-}
-
-/* =========================================================
-   WEAPON CLASH SYSTEM
-   ========================================================= */
-
-function checkWeaponClash(attacker, defender, hitbox) {
-  // Clash occurs when both hitboxes active at same time and overlap
-  if (!defender.currentHitbox || !attacker.currentHitbox) return false;
-
-  const a = attacker.currentHitbox;
-  const d = defender.currentHitbox;
-
-  if (
-    a.x < d.x + d.w &&
-    a.x + a.w > d.x &&
-    a.y < d.y + d.h &&
-    a.y + a.h > d.y
-  ) {
-    // Clash detected
-    triggerHitstop(0.12, 0.08);
-    triggerScreenShake(8, 0.2);
-
+  // Parry timing window
+  const timeDiff = Math.abs(attacker.weaponTimer - defender.weaponTimer);
+  if (timeDiff < 0.15) {
+    // Successful parry
+    defender.weaponState = WEAPON_STATES.PARRY;
     attacker.weaponState = WEAPON_STATES.STAGGER;
-    defender.weaponState = WEAPON_STATES.STAGGER;
-
-    attacker.weaponTimer = 0.25;
-    defender.weaponTimer = 0.25;
-
+    attacker.vx = -attacker.facing * 2;
+    attacker.vy = -1;
     return true;
   }
-
   return false;
 }
 
-/* =========================================================
-   ATTACK PRIORITY SYSTEM
-   ========================================================= */
+/* -----------------------------
+   WEAPON CLASH + PRIORITY
+   ----------------------------- */
+function weaponClash(attacker, defender) {
+  // If both attacking heavy attacks at same time
+  if (
+    (attacker.weaponState === WEAPON_STATES.HEAVY || attacker.weaponState === WEAPON_STATES.CHARGED) &&
+    (defender.weaponState === WEAPON_STATES.HEAVY || defender.weaponState === WEAPON_STATES.CHARGED)
+  ) {
+    // Compare weapon priority
+    const attackerPriority = getWeaponPriority(attacker.weapon);
+    const defenderPriority = getWeaponPriority(defender.weapon);
 
-const ATTACK_PRIORITY = {
-  HEAVY: 3,
-  NORMAL: 2,
-  LIGHT: 1
-};
-
-function getHitPriority(hitbox) {
-  return ATTACK_PRIORITY[hitbox.type] || 1;
-}
-
-function resolveAttackPriority(attacker, defender, hitbox) {
-  if (!defender.currentHitbox) return true;
-
-  const attackerPriority = getHitPriority(hitbox);
-  const defenderPriority = getHitPriority(defender.currentHitbox);
-
-  if (attackerPriority >= defenderPriority) {
-    // Attacker wins priority
-    resolveHit(attacker, defender, hitbox);
-    return true;
-  } else {
-    // Defender absorbs / parries attack
-    checkParry(attacker, defender, hitbox);
-    return false;
-  }
-}
-
-/* =========================================================
-   GLOBAL COMBAT UPDATE INTEGRATION
-   ========================================================= */
-
-function combatUpdate(p, opponents, dt) {
-  // Update parry timer
-  initParry(p);
-  updateParry(p, dt);
-  attemptParry(p);
-
-  // Process all hitboxes
-  p.currentHitbox = null;
-  spawnComboHitboxes(p);
-  if (p.currentHitbox) {
-    for (let o of opponents) {
-      if (o === p) continue;
-
-      // First check clash
-      if (checkWeaponClash(p, o, p.currentHitbox)) continue;
-
-      // Then priority + parry
-      resolveAttackPriority(p, o, p.currentHitbox);
+    if (attackerPriority > defenderPriority) {
+      defender.weaponState = WEAPON_STATES.STAGGER;
+      attacker.weaponState = WEAPON_STATES.ATTACK; // recovers faster
+    } else if (attackerPriority < defenderPriority) {
+      attacker.weaponState = WEAPON_STATES.STAGGER;
+      defender.weaponState = WEAPON_STATES.ATTACK;
+    } else {
+      // Equal priority → bounce off
+      attacker.vx *= -0.5;
+      defender.vx *= -0.5;
+      attacker.weaponState = WEAPON_STATES.STAGGER;
+      defender.weaponState = WEAPON_STATES.STAGGER;
     }
   }
-
-  // Reset after update
-  p.currentHitbox = null;
-}
-/* =========================================================
-   BOSS STAGGER SYSTEM
-   ========================================================= */
-
-function initBoss(boss) {
-  boss.hp = boss.maxHp || 500;
-  boss.stagger = {
-    current: 0,
-    threshold: 100,
-    timer: 0
-  };
-  boss.armorPhase = 0;
-  boss.limbs = {
-    leftArm: { hp: 100, broken: false },
-    rightArm: { hp: 100, broken: false },
-    leftLeg: { hp: 100, broken: false },
-    rightLeg: { hp: 100, broken: false }
-  };
 }
 
-function applyBossDamage(boss, damage, limb = null) {
-  // Apply limb-specific damage if provided
-  if (limb && boss.limbs[limb] && !boss.limbs[limb].broken) {
+function getWeaponPriority(weapon) {
+  switch (weapon) {
+    case "longsword": return 3;
+    case "katana": return 2;
+    case "scythe": return 1;
+    case "fist_tanto": return 0;
+    default: return 0;
+  }
+}
+
+/* -----------------------------
+   BOSS STAGGER / BREAK GAUGE
+   ----------------------------- */
+function bossTakeDamage(boss, damage, limb = null) {
+  // Apply damage to break gauge if attacking limb
+  if (limb && boss.limbs[limb]) {
     boss.limbs[limb].hp -= damage;
     if (boss.limbs[limb].hp <= 0) {
       boss.limbs[limb].broken = true;
-      triggerScreenShake(12, 0.35);
-      triggerHitstop(0.1);
+      boss.attackCooldown += 1.5; // penalize boss
     }
   }
 
+  // Main HP
   boss.hp -= damage;
-  boss.stagger.current += damage;
+  boss.breakGauge += damage * 0.5;
 
-  // Check stagger threshold
-  if (boss.stagger.current >= boss.stagger.threshold) {
-    triggerBossStagger(boss);
-    boss.stagger.current = 0;
-  }
-
-  updateBossArmorPhase(boss);
-}
-
-function triggerBossStagger(boss) {
-  boss.weaponState = WEAPON_STATES.STAGGER;
-  boss.weaponTimer = 0.8;
-
-  triggerHitstop(0.12, 0.1);
-  triggerScreenShake(10, 0.3);
-}
-
-/* =========================================================
-   BOSS ARMOR PHASE SYSTEM
-   ========================================================= */
-
-const ARMOR_PHASES = [
-  { hpRatio: 1.0, damageReduction: 0.0 }, // Phase 0: No reduction
-  { hpRatio: 0.75, damageReduction: 0.15 },
-  { hpRatio: 0.5, damageReduction: 0.30 },
-  { hpRatio: 0.25, damageReduction: 0.50 }
-];
-
-function updateBossArmorPhase(boss) {
-  const hpRatio = boss.hp / boss.maxHp;
-  for (let i = ARMOR_PHASES.length - 1; i >= 0; i--) {
-    if (hpRatio <= ARMOR_PHASES[i].hpRatio) {
-      if (boss.armorPhase !== i) {
-        boss.armorPhase = i;
-        triggerScreenShake(8, 0.25);
-        triggerHitstop(0.08, 0.08);
-      }
-      break;
-    }
+  // Stagger thresholds
+  if (boss.breakGauge >= boss.breakThreshold) {
+    boss.staggered = true;
+    boss.breakGauge = 0;
+    boss.staggerTimer = 2.0; // 2 seconds stagger
+    // Force all limbs to idle
+    Object.keys(boss.limbs).forEach(l => {
+      boss.limbs[l].state = "idle";
+    });
   }
 }
 
-function applyArmorReduction(boss, damage) {
-  const reduction = ARMOR_PHASES[boss.armorPhase].damageReduction || 0;
-  return damage * (1 - reduction);
+/* -----------------------------
+   BOSS ARMOR PHASES
+   ----------------------------- */
+function bossArmorPhase(boss) {
+  if (boss.hp > 350) boss.phase = 1; // default armor, normal attacks
+  else if (boss.hp <= 350 && boss.hp > 150) boss.phase = 2; // weakened armor, faster attacks
+  else boss.phase = 3; // critical armor, very aggressive
 }
 
-/* =========================================================
-   LIMB BREAK MECHANIC
-   ========================================================= */
-
-function isLimbBroken(boss, limb) {
-  return boss.limbs[limb] && boss.limbs[limb].broken;
-}
-
-function limbDamage(boss, limb, damage) {
-  if (!boss.limbs[limb] || boss.limbs[limb].broken) return 0;
-  boss.limbs[limb].hp -= damage;
-
-  if (boss.limbs[limb].hp <= 0) {
-    boss.limbs[limb].broken = true;
-    triggerScreenShake(10, 0.3);
-    triggerHitstop(0.1);
-    return damage;
-  }
-  return damage;
-}
-
-/* =========================================================
-   BOSS UPDATE HOOK
-   ========================================================= */
-
-function bossUpdate(boss, dt) {
-  // Reduce stagger timer
-  if (boss.weaponState === WEAPON_STATES.STAGGER) {
-    boss.weaponTimer -= dt;
-    if (boss.weaponTimer <= 0) boss.weaponState = WEAPON_STATES.IDLE;
-  }
-
-  // Update limb states or apply visual effects
+/* -----------------------------
+   LIMB BREAK SYSTEM
+   ----------------------------- */
+function bossLimbBreakCheck(boss) {
   for (let limb in boss.limbs) {
-    if (boss.limbs[limb].broken) {
-      // Example: reduce mobility or disable attack from that limb
-      // Left to render logic / animation
+    if (boss.limbs[limb].broken && boss.limbs[limb].state !== "disabled") {
+      boss.limbs[limb].state = "disabled";
+      boss.limbs[limb].vx = 0;
+      boss.limbs[limb].vy = 0;
+    }
+  }
+}
+
+/* -----------------------------
+   BOSS UPDATE
+   ----------------------------- */
+function bossUpdate(boss, dt) {
+  // Stagger handling
+  if (boss.staggered) {
+    boss.staggerTimer -= dt;
+    if (boss.staggerTimer <= 0) boss.staggered = false;
+    return;
+  }
+
+  // Armor phase update
+  bossArmorPhase(boss);
+
+  // Limb break check
+  bossLimbBreakCheck(boss);
+
+  // Basic AI for movement
+  const nearestPlayer = boss.players.reduce((a, b) => (distance(b, boss) < distance(a, boss) ? b : a));
+  const dir = nearestPlayer.x > boss.x ? 1 : -1;
+  boss.x += dir * boss.speed * dt;
+
+  // Attack patterns
+  bossAttackPattern(boss, nearestPlayer);
+}
+
+/* -----------------------------
+   UTILITY: DISTANCE
+   ----------------------------- */
+function distance(a, b) {
+  const dx = b.x - a.x;
+  const dy = b.y - a.y;
+  return Math.sqrt(dx * dx + dy * dy);
+}
+
+/* -----------------------------
+   BOSS ATTACK PATTERN (simplified)
+   ----------------------------- */
+function bossAttackPattern(boss, target) {
+  if (boss.staggered) return;
+
+  const rand = Math.random();
+  if (rand < 0.3) blackOrbBarrage(boss, target);
+  else if (rand < 0.6) dashSlash(boss, target);
+  else normalSlashes(boss, target);
+}
+
+/* -----------------------------
+   MOCKED BOSS ATTACKS
+   ----------------------------- */
+function blackOrbBarrage(boss, target) {
+  registerHit(boss, target, 35, 1, 0);
+}
+
+function dashSlash(boss, target) {
+  registerHit(boss, target, 40, 3, 0);
+}
+
+function normalSlashes(boss, target) {
+  registerHit(boss, target, 35, 2, 0);
+}
+/* =========================================================
+   Full Game.js → Part 5
+   Cinematic Finishers, Final Stagger, Camera Locks, Rewards
+   ========================================================= */
+
+/* -----------------------------
+   CINEMATIC FINISHER
+   ----------------------------- */
+function triggerCinematicFinisher(attacker, defender) {
+  if (!defender || defender.hp > 0) return;
+
+  // Lock camera on target
+  cameraLock(attacker, defender);
+
+  // Slow down time
+  gameTimeScale = 0.3;
+
+  // Play animation sequence
+  const sequence = [
+    () => playAnimation(attacker, "grab"),
+    () => playAnimation(attacker, "airSwing"),
+    () => playAnimation(attacker, "slam"),
+    () => playAnimation(defender, "impact"),
+    () => playAnimation(attacker, "finish")
+  ];
+
+  let step = 0;
+  const interval = setInterval(() => {
+    if (step >= sequence.length) {
+      clearInterval(interval);
+      finishCinematic(attacker, defender);
+      return;
+    }
+    sequence[step++]();
+  }, 400);
+}
+
+/* -----------------------------
+   CAMERA LOCK
+   ----------------------------- */
+function cameraLock(attacker, defender) {
+  camera.x = (attacker.x + defender.x) / 2;
+  camera.y = (attacker.y + defender.y) / 2;
+  camera.zoom = 1.5;
+}
+
+/* -----------------------------
+   FINISH CINEMATIC
+   ----------------------------- */
+function finishCinematic(attacker, defender) {
+  // Restore normal time
+  gameTimeScale = 1.0;
+  camera.zoom = 1.0;
+
+  // Reset positions slightly for respawn or post-match
+  defender.x = defender.spawnX;
+  defender.y = defender.spawnY;
+  defender.hp = defender.maxHp;
+  attacker.combo = 0;
+
+  // Trigger rewards
+  grantRewards(attacker, defender);
+}
+
+/* -----------------------------
+   REWARDS / LOOT SYSTEM
+   ----------------------------- */
+function grantRewards(attacker, defender) {
+  // Gold / currency
+  const gold = Math.floor(Math.random() * 50 + 50);
+  attacker.gold += gold;
+
+  // Experience points
+  const xp = Math.floor(Math.random() * 20 + 30);
+  attacker.xp += xp;
+
+  // Weapon unlock chance (boss only)
+  if (defender.isBoss && defender.hp <= 0) {
+    const dropChance = Math.random();
+    if (dropChance < 0.5) {
+      unlockWeapon(attacker, "Apostle Sword");
     }
   }
 
-  // Armor phase affects damage taken (integrated in applyBossDamage)
+  // Display reward UI
+  showRewardUI(attacker, gold, xp);
 }
 
+/* -----------------------------
+   UI DISPLAY FUNCTIONS
+   ----------------------------- */
+function showRewardUI(player, gold, xp) {
+  floatingText(`+${gold} Gold`, player.x, player.y - 50, "yellow");
+  floatingText(`+${xp} XP`, player.x, player.y - 70, "green");
+}
+
+function floatingText(text, x, y, color) {
+  // Add temporary UI element
+  ctx.fillStyle = color;
+  ctx.font = "20px Arial";
+  ctx.fillText(text, x, y);
+  setTimeout(() => clearText(x, y), 1000);
+}
+
+function clearText(x, y) {
+  // Overdraw with background (simple clear)
+  ctx.clearRect(x - 10, y - 20, 100, 30);
+}
+
+/* -----------------------------
+   WEAPON UNLOCK
+   ----------------------------- */
+function unlockWeapon(player, weaponName) {
+  if (!player.weapons.includes(weaponName)) {
+    player.weapons.push(weaponName);
+    floatingText(`Unlocked: ${weaponName}`, player.x, player.y - 90, "orange");
+  }
+}
+
+/* -----------------------------
+   POST-BOSS DEFEAT RESET
+   ----------------------------- */
+function resetBossArena(boss) {
+  boss.hp = boss.maxHp;
+  boss.staggered = false;
+  boss.breakGauge = 0;
+  Object.keys(boss.limbs).forEach(limb => {
+    boss.limbs[limb].broken = false;
+    boss.limbs[limb].state = "idle";
+    boss.limbs[limb].hp = boss.limbs[limb].maxHp;
+  });
+  camera.x = arenaCenterX;
+  camera.y = arenaCenterY;
+  camera.zoom = 1.0;
+}
 /* =========================================================
-   INTEGRATED DAMAGE PIPELINE FOR BOSS
+   Full Game.js → Part 6
+   Particle effects, sounds, render loop, client-server hooks
    ========================================================= */
 
-function resolveBossHit(attacker, boss, hitbox, limb = null) {
-  let rawDamage = hitbox.damage;
+/* -----------------------------
+   PARTICLE SYSTEM
+   ----------------------------- */
+const particles = [];
 
-  // Apply armor reduction
-  rawDamage = applyArmorReduction(boss, rawDamage);
-
-  // Apply limb-specific damage if applicable
-  if (limb) {
-    limbDamage(boss, limb, rawDamage);
-  }
-
-  applyBossDamage(boss, rawDamage, limb);
-  onSuccessfulHit(attacker, boss, hitbox);
+function spawnParticle(x, y, color, vx, vy, life = 0.5) {
+  particles.push({ x, y, vx, vy, life, color });
 }
+
+function updateParticles(dt) {
+  for (let i = particles.length - 1; i >= 0; i--) {
+    const p = particles[i];
+    p.x += p.vx * dt;
+    p.y += p.vy * dt;
+    p.life -= dt;
+    if (p.life <= 0) particles.splice(i, 1);
+  }
+}
+
+function drawParticles(ctx) {
+  particles.forEach(p => {
+    ctx.fillStyle = p.color;
+    ctx.fillRect(p.x, p.y, 2, 2);
+  });
+}
+
+/* -----------------------------
+   SOUND HOOKS
+   ----------------------------- */
+const sfx = {
+  slash: new Audio("assets/sounds/slash.mp3"),
+  hit: new Audio("assets/sounds/hit.mp3"),
+  grunt: new Audio("assets/sounds/grunt.mp3"),
+  block: new Audio("assets/sounds/block.mp3"),
+  bossRoar: new Audio("assets/sounds/boss_roar.mp3"),
+};
+
+function playSFX(name) {
+  if (sfx[name]) sfx[name].play();
+}
+
+/* -----------------------------
+   HIT EFFECTS
+   ----------------------------- */
+function registerHit(attacker, defender, damage, knockback, verticalLaunch) {
+  defender.hp -= damage;
+  defender.vx += knockback * (defender.x < attacker.x ? -1 : 1);
+  defender.vy -= verticalLaunch;
+  defender.hitstun = 0.5;
+
+  // Spawn particles
+  spawnParticle(defender.x, defender.y, "red", Math.random() * 2 - 1, -2, 0.5);
+
+  // Play sound
+  playSFX("hit");
+
+  // Increment combo
+  attacker.comboCounter++;
+  attacker.lastHitTime = Date.now();
+}
+
+/* -----------------------------
+   COMBO FLOATING TEXT
+   ----------------------------- */
+function drawComboText(ctx, player) {
+  if (player.comboCounter > 1) {
+    ctx.fillStyle = "white";
+    ctx.font = "18px Arial";
+    ctx.fillText(`x${player.comboCounter} Hit`, player.x, player.y - 60);
+  }
+}
+
+/* -----------------------------
+   COOLDOWN VISUALS
+   ----------------------------- */
+function drawCooldowns(ctx, player) {
+  player.specialCooldowns.forEach(cd => {
+    const percent = Math.max(0, cd.timer / cd.max);
+    ctx.fillStyle = "rgba(255,255,255,0.3)";
+    ctx.fillRect(player.x - 20, player.y - 50 - cd.index * 10, 40 * percent, 5);
+  });
+}
+
+/* -----------------------------
+   MAIN RENDER LOOP
+   ----------------------------- */
+function renderGame() {
+  const dt = 1 / 60;
+
+  // Clear
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+  // Draw arena
+  drawArena(ctx);
+
+  // Draw players
+  players.forEach(player => {
+    drawPlayer(ctx, player);
+    drawComboText(ctx, player);
+    drawCooldowns(ctx, player);
+  });
+
+  // Draw particles
+  drawParticles(ctx);
+
+  // Boss draw
+  if (boss) drawBoss(ctx, boss);
+
+  requestAnimationFrame(renderGame);
+}
+
+/* -----------------------------
+   PLAYER DRAW
+   ----------------------------- */
+function drawPlayer(ctx, player) {
+  ctx.fillStyle = player.color;
+  ctx.fillRect(player.x - 15, player.y - 40, 30, 40);
+}
+
+/* -----------------------------
+   BOSS DRAW
+   ----------------------------- */
+function drawBoss(ctx, boss) {
+  ctx.fillStyle = "purple";
+  ctx.fillRect(boss.x - 50, boss.y - 100, 100, 100);
+
+  // Limb break indicator
+  Object.keys(boss.limbs).forEach(limb => {
+    if (boss.limbs[limb].broken) {
+      ctx.fillStyle = "red";
+      ctx.fillRect(boss.x - 50 + boss.limbs[limb].offsetX, boss.y - 100 + boss.limbs[limb].offsetY, 10, 10);
+    }
+  });
+}
+
+/* -----------------------------
+   ARENA DRAW
+   ----------------------------- */
+function drawArena(ctx) {
+  ctx.fillStyle = "#444";
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  platforms.forEach(p => {
+    ctx.fillStyle = "#666";
+    ctx.fillRect(p.x, p.y, p.width, p.height);
+  });
+}
+
+/* -----------------------------
+   NETWORK SYNC STUBS
+   ----------------------------- */
+function sendPlayerUpdate(player) {
+  // Example stub: emit position, state to server
+  if (!socket) return;
+  socket.emit("playerUpdate", {
+    id: player.id,
+    x: player.x,
+    y: player.y,
+    vx: player.vx,
+    vy: player.vy,
+    hp: player.hp,
+    comboCounter: player.comboCounter,
+  });
+}
+
+function receivePlayerUpdate(data) {
+  const p = players.find(pl => pl.id === data.id);
+  if (!p) return;
+  // Basic interpolation
+  p.targetX = data.x;
+  p.targetY = data.y;
+  p.hp = data.hp;
+  p.comboCounter = data.comboCounter;
+}
+
+/* -----------------------------
+   CLIENT INTERPOLATION
+   ----------------------------- */
+function interpolatePlayers(dt) {
+  players.forEach(p => {
+    if (p.targetX !== undefined) {
+      p.x += (p.targetX - p.x) * 0.1;
+      p.y += (p.targetY - p.y) * 0.1;
+    }
+  });
+}
+
+/* -----------------------------
+   GAME LOOP
+   ----------------------------- */
+function gameLoop() {
+  const dt = 1 / 60;
+
+  // Update players
+  players.forEach(p => playerUpdate(p, dt));
+
+  // Update boss
+  if (boss) bossUpdate(boss, dt);
+
+  // Interpolation
+  interpolatePlayers(dt);
+
+  // Update particles
+  updateParticles(dt);
+
+  // Send network updates
+  players.forEach(p => sendPlayerUpdate(p));
+
+  requestAnimationFrame(gameLoop);
+}
+
+// Start render & game loops
+renderGame();
+gameLoop();
